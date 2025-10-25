@@ -186,6 +186,17 @@ class MarkdownDocumentBackend(DeclarativeDocumentBackend):
             num_cols = len(result_table[0])
             self.in_table = False
             self.md_table_buffer = []  # clean table markdown buffer
+            
+            # Look for table caption
+            table_caption: Optional[TextItem] = None
+            caption_text = self._find_table_caption()
+            if caption_text:
+                _log.debug(f"Found table caption: {caption_text}")
+                table_caption = doc.add_text(
+                    label=DocItemLabel.CAPTION,
+                    text=caption_text
+                )
+            
             # Initialize Docling TableData
             table_data = TableData(
                 num_rows=num_rows, num_cols=num_cols, table_cells=tcells
@@ -194,7 +205,7 @@ class MarkdownDocumentBackend(DeclarativeDocumentBackend):
             for tcell in tcells:
                 table_data.table_cells.append(tcell)
             if len(tcells) > 0:
-                doc.add_table(data=table_data)
+                doc.add_table(data=table_data, caption=table_caption)
         return
 
     def _create_list_item(
@@ -242,31 +253,39 @@ class MarkdownDocumentBackend(DeclarativeDocumentBackend):
         return item
 
     def _is_caption_element(self, element: marko.element.Element) -> bool:
-        """Check if an element is a caption element (HTML span with caption class or similar patterns)."""
+        """Check if an element is a caption element (HTML span with data-class caption attributes)."""
         if isinstance(element, marko.block.HTMLBlock):
             html_content = element.body.strip() if hasattr(element, 'body') else ""
-            # Check for span with data-class="image-caption" or class="caption"
+            # Check for span with data-class="image-caption" or "table-caption"
             if ('data-class="image-caption"' in html_content or 
-                'class="image-caption"' in html_content or
-                'class="caption"' in html_content):
+                'data-class="table-caption"' in html_content):
                 return True
         elif isinstance(element, marko.inline.InlineHTML):
             # Handle inline HTML spans
             html_content = element.children if hasattr(element, 'children') and isinstance(element.children, str) else ""
             if ('data-class="image-caption"' in html_content or 
-                'class="image-caption"' in html_content or
-                'class="caption"' in html_content):
+                'data-class="table-caption"' in html_content):
                 return True
         elif isinstance(element, marko.block.Paragraph):
-            # Check if paragraph starts with "Figure" or "Caption:" patterns
+            # Check if paragraph contains inline HTML with caption data-class attributes
+            for child in element.children:
+                if isinstance(child, marko.inline.InlineHTML):
+                    html_content = child.children if hasattr(child, 'children') and isinstance(child.children, str) else ""
+                    if ('data-class="image-caption"' in html_content or 
+                        'data-class="table-caption"' in html_content):
+                        return True
+            
+            # Check if paragraph starts with "Figure", "Table", or "Caption:" patterns
             if (len(element.children) > 0 and 
                 isinstance(element.children[0], (marko.inline.RawText, marko.inline.Literal))):
                 text = element.children[0].children if hasattr(element.children[0], 'children') else ""
                 if isinstance(text, str):
                     text_lower = text.lower().strip()
                     if (text_lower.startswith('figure ') or 
+                        text_lower.startswith('table ') or
                         text_lower.startswith('caption:') or
-                        text_lower.startswith('fig. ')):
+                        text_lower.startswith('fig. ') or
+                        text_lower.startswith('tbl. ')):
                         return True
         return False
 
@@ -280,12 +299,27 @@ class MarkdownDocumentBackend(DeclarativeDocumentBackend):
             if span_match:
                 return unescape(span_match.group(1).strip())
         elif isinstance(element, marko.block.Paragraph):
-            # Extract text from paragraph elements
+            # Extract text from paragraph elements, collecting text from children
             text_parts = []
+            inside_caption_span = False
+            
             for child in element.children:
-                if isinstance(child, (marko.inline.RawText, marko.inline.Literal)):
+                if isinstance(child, marko.inline.InlineHTML):
+                    html_content = child.children if hasattr(child, 'children') and isinstance(child.children, str) else ""
+                    # Check if this is a caption span opening tag
+                    if ('data-class="table-caption"' in html_content or 'class="table-caption"' in html_content):
+                        inside_caption_span = True
+                    elif '</span>' in html_content:
+                        inside_caption_span = False
+                elif isinstance(child, (marko.inline.RawText, marko.inline.Literal)) and inside_caption_span:
                     if hasattr(child, 'children') and isinstance(child.children, str):
                         text_parts.append(child.children)
+                elif isinstance(child, (marko.inline.RawText, marko.inline.Literal)) and not any(
+                    isinstance(c, marko.inline.InlineHTML) for c in element.children):
+                    # If no inline HTML, just collect all text
+                    if hasattr(child, 'children') and isinstance(child.children, str):
+                        text_parts.append(child.children)
+            
             return unescape(" ".join(text_parts).strip())
         return ""
 
@@ -300,6 +334,60 @@ class MarkdownDocumentBackend(DeclarativeDocumentBackend):
                     return self._extract_caption_text(next_element)
         except (ValueError, AttributeError):
             pass
+        return None
+
+    def _find_table_caption(self) -> Optional[str]:
+        """Find table caption after the current table in the document structure."""
+        if not self.doc_children:
+            _log.debug("No doc_children available for caption search")
+            return None
+        
+        _log.debug(f"Searching for table captions in {len(self.doc_children)} document children")
+        
+        # Look through document children for potential table captions
+        # Since we're in table parsing, we look ahead in the document structure
+        try:
+            for i, element in enumerate(self.doc_children):
+                _log.debug(f"Checking element {i}: {type(element)}")
+                if self._is_caption_element(element):
+                    _log.debug(f"Found caption element: {element}")
+                    # Check if this is a table caption specifically
+                    if isinstance(element, marko.block.HTMLBlock):
+                        html_content = element.body.strip() if hasattr(element, 'body') else ""
+                        _log.debug(f"HTML content: {html_content}")
+                        if 'data-class="table-caption"' in html_content:
+                            caption_text = self._extract_caption_text(element)
+                            _log.debug(f"Found table caption: {caption_text}")
+                            return caption_text
+                    elif isinstance(element, marko.block.Paragraph):
+                        # Check if paragraph contains table caption inline HTML
+                        has_table_caption = False
+                        for child in element.children:
+                            if isinstance(child, marko.inline.InlineHTML):
+                                html_content = child.children if hasattr(child, 'children') and isinstance(child.children, str) else ""
+                                if 'data-class="table-caption"' in html_content:
+                                    has_table_caption = True
+                                    break
+                        
+                        if has_table_caption:
+                            caption_text = self._extract_caption_text(element)
+                            _log.debug(f"Found table caption from paragraph with inline HTML: {caption_text}")
+                            return caption_text
+                        
+                        # Check if paragraph starts with "Table" patterns
+                        if (len(element.children) > 0 and 
+                            isinstance(element.children[0], (marko.inline.RawText, marko.inline.Literal))):
+                            text = element.children[0].children if hasattr(element.children[0], 'children') else ""
+                            if isinstance(text, str):
+                                text_lower = text.lower().strip()
+                                if (text_lower.startswith('table ') or text_lower.startswith('tbl. ')):
+                                    caption_text = self._extract_caption_text(element)
+                                    _log.debug(f"Found table caption from paragraph: {caption_text}")
+                                    return caption_text
+        except (ValueError, AttributeError) as e:
+            _log.debug(f"Error finding table caption: {e}")
+        
+        _log.debug("No table caption found")
         return None
 
     def _find_inline_caption_in_paragraph(self, paragraph: marko.block.Paragraph, image_element: marko.inline.Image) -> Optional[str]:

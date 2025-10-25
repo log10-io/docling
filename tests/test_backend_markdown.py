@@ -8,6 +8,7 @@ from docling.datamodel.document import (
     InputDocument,
 )
 from docling.document_converter import DocumentConverter
+from docling_core.types.doc import DocItemLabel
 from tests.verify_utils import CONFID_PREC, COORD_PREC
 
 from .test_data_gen_flag import GEN_TEST_DATA
@@ -109,3 +110,78 @@ def test_e2e_md_conversions():
 
         pred_md_: str = doc_.export_to_markdown()
         assert true_md == pred_md_
+
+
+def test_table_caption_support():
+    """Test that markdown backend correctly handles table captions."""
+    
+    # Test markdown with table and caption
+    markdown_content = """# Test Document
+
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Data 1   | Data 2   | Data 3   |
+| Data 4   | Data 5   | Data 6   |
+
+<span data-class="table-caption">Table 1: Sample table with caption</span>
+
+Some text after the table.
+"""
+    
+    converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+    conv_result: ConversionResult = converter.convert_string(
+        markdown_content, format=InputFormat.MD, name="test_table_caption.md"
+    )
+    
+    doc: DoclingDocument = conv_result.document
+    
+    # Check that we have a table
+    assert len(doc.tables) == 1, f"Expected 1 table, found {len(doc.tables)}"
+    
+    table = doc.tables[0]
+    
+    # Check that the table has a caption
+    assert len(table.captions) == 1, f"Table should have 1 caption, found {len(table.captions)}"
+    
+    # Get the caption text item
+    caption_ref = table.captions[0]
+    # Find the text item that the caption refers to
+    caption_text_item = None
+    for text_item in doc.texts:
+        if text_item.self_ref == caption_ref.cref:
+            caption_text_item = text_item
+            break
+    
+    assert caption_text_item is not None, "Caption text item should be found"
+    assert caption_text_item.text == "Table 1: Sample table with caption", f"Caption text mismatch: {caption_text_item.text}"
+    assert caption_text_item.label == DocItemLabel.CAPTION, f"Caption should have CAPTION label, got {caption_text_item.label}"
+
+
+def test_table_without_caption():
+    """Test that markdown backend works correctly with tables that have no captions."""
+    
+    # Test markdown with table but no caption
+    markdown_content = """# Test Document
+
+| Column 1 | Column 2 |
+|----------|----------|
+| Data 1   | Data 2   |
+| Data 3   | Data 4   |
+
+Some text after the table.
+"""
+    
+    converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+    conv_result: ConversionResult = converter.convert_string(
+        markdown_content, format=InputFormat.MD, name="test_table_no_caption.md"
+    )
+    
+    doc: DoclingDocument = conv_result.document
+    
+    # Check that we have a table
+    assert len(doc.tables) == 1, f"Expected 1 table, found {len(doc.tables)}"
+    
+    table = doc.tables[0]
+    
+    # Check that the table has no caption
+    assert len(table.captions) == 0, f"Table should not have a caption, got {len(table.captions)} captions"
